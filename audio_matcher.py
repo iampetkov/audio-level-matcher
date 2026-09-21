@@ -1138,6 +1138,7 @@ class App(tk.Tk):
         self._tl_drag_start_cy = 0.0
         self._tl_drag_all_orig = {}   # bid → (start_sec, track) for multi-drag
         self._tl_drag_copy     = False  # True when Option+drag should clone on first motion
+        self._scroll_target    = None   # canvas currently under the cursor
         self._tl_rubber        = None # (cx0,cy0,cx1,cy1) rubber-band in canvas coords
         # waveform editor state for selected block
         self._blk_trim_var     = tk.DoubleVar(value=0.0)
@@ -1146,7 +1147,47 @@ class App(tk.Tk):
         self._build()
         self._poll_playback()
 
+    def _setup_native_scroll(self):
+        """macOS: intercept trackpad scroll via NSEvent before the OS routes it.
+        tkinter's <MouseWheel> binding never fires for bare NSView (Canvas)."""
+        import sys
+        if sys.platform != "darwin":
+            return
+        try:
+            from AppKit import NSEvent
+        except ImportError:
+            return
+
+        def _cb(ev):
+            if self._scroll_target != "tl":
+                return ev
+            try:
+                dy = ev.scrollingDeltaY()
+                dx = ev.scrollingDeltaX()
+                if abs(dy) >= abs(dx) and dy != 0:
+                    bbox = self._tl_cv.bbox("all")
+                    total_h = max((bbox[3] - bbox[1]) if bbox else self._tl_cv.winfo_height(), 1)
+                    y0, _ = self._tl_cv.yview()
+                    self._tl_cv.yview_moveto(max(0.0, min(1.0, y0 - dy / total_h)))
+                elif abs(dx) > abs(dy) and dx != 0:
+                    bbox = self._tl_cv.bbox("all")
+                    total_w = max((bbox[2] - bbox[0]) if bbox else self._tl_cv.winfo_width(), 1)
+                    x0, _ = self._tl_cv.xview()
+                    self._tl_cv.xview_moveto(max(0.0, min(1.0, x0 - dx / total_w)))
+            except Exception:
+                pass
+            return ev
+
+        self._ns_scroll_monitor = NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
+            1 << 22, _cb)   # 1<<22 = NSEventTypeScrollWheel
+
     def _on_close(self):
+        if getattr(self, "_ns_scroll_monitor", None) is not None:
+            try:
+                from AppKit import NSEvent
+                NSEvent.removeMonitor_(self._ns_scroll_monitor)
+            except Exception:
+                pass
         self._player_ref.stop(save_position=False)
         self._player_out.stop(save_position=False)
         self._tl_stop()
@@ -1159,7 +1200,7 @@ class App(tk.Tk):
         tk.Frame(parent, height=h).pack(fill="x")
 
     def _scrollable(self, parent):
-        """Return a scrollable frame child. Bind mousewheel to it."""
+        """Return a scrollable frame child."""
         container = tk.Frame(parent)
         container.pack(fill="both", expand=True)
         cs = tk.Canvas(container, highlightthickness=0)
@@ -1173,8 +1214,7 @@ class App(tk.Tk):
                    lambda e: cs.configure(scrollregion=cs.bbox("all")))
         cs.bind("<Configure>",
                 lambda e: cs.itemconfig(win_id, width=e.width))
-        cs.bind_all("<MouseWheel>",
-                    lambda e: cs.yview_scroll(int(-1*(e.delta/120)), "units"))
+        self._left_cs = cs   # saved for global scroll routing
         return inner
 
     def _build(self):
@@ -1893,9 +1933,12 @@ class App(tk.Tk):
         self._lbl_cv.bind("<ButtonPress-1>",   self._tl_lbl_press)
         self._lbl_cv.bind("<B1-Motion>",       self._tl_lbl_motion)
         self._lbl_cv.bind("<ButtonRelease-1>", self._tl_lbl_release)
-        self._lbl_cv.bind("<MouseWheel>",       self._tl_on_wheel)
-        self._lbl_cv.bind("<Shift-MouseWheel>", self._tl_on_wheel_h)
-        self._ruler_cv.bind("<Shift-MouseWheel>", self._tl_on_wheel_h)
+        self._lbl_cv.bind("<Enter>",      lambda e: (self._lbl_cv.focus_set(),   setattr(self, "_scroll_target", "tl")))
+        self._lbl_cv.bind("<Leave>",      lambda e: setattr(self, "_scroll_target", None))
+        self._lbl_cv.bind("<MouseWheel>", self._tl_on_wheel)
+        self._ruler_cv.bind("<Enter>",      lambda e: (self._ruler_cv.focus_set(), setattr(self, "_scroll_target", "tl")))
+        self._ruler_cv.bind("<Leave>",      lambda e: setattr(self, "_scroll_target", None))
+        self._ruler_cv.bind("<MouseWheel>", self._tl_on_wheel)
 
         # right: scrollable timeline (no ruler — handled by _ruler_cv above)
         tl_frame = tk.Frame(tracks_row)
@@ -1915,8 +1958,9 @@ class App(tk.Tk):
         self._tl_cv.bind("<B1-Motion>",        self._tl_on_motion)
         self._tl_cv.bind("<ButtonRelease-1>",  self._tl_on_release)
         self._tl_cv.bind("<Configure>",        lambda e: self._tl_draw())
-        self._tl_cv.bind("<MouseWheel>",        self._tl_on_wheel)
-        self._tl_cv.bind("<Shift-MouseWheel>",  self._tl_on_wheel_h)
+        self._tl_cv.bind("<Enter>",      lambda e: (self._tl_cv.focus_set(), setattr(self, "_scroll_target", "tl")))
+        self._tl_cv.bind("<Leave>",      lambda e: setattr(self, "_scroll_target", None))
+        self._tl_cv.bind("<MouseWheel>", self._tl_on_wheel)
         self.bind("<space>",          self._tl_toggle_play)
         self.bind("<KeyPress-space>", self._tl_toggle_play)
         self.bind("<Delete>",         self._tl_on_delete)
@@ -1924,6 +1968,7 @@ class App(tk.Tk):
         self.bind("<Command-z>",      self._undo)
         self.bind("<Command-Z>",      self._redo)
 
+        self._setup_native_scroll()
         self._tl_draw_labels()
 
     # ── timeline helpers ───────────────────────────────────────────────
@@ -1940,15 +1985,12 @@ class App(tk.Tk):
         self._ruler_cv.xview_moveto(float(first))
 
     def _tl_on_wheel(self, event):
-        amount = max(1, abs(event.delta))
-        direction = -1 if event.delta > 0 else 1
-        self._tl_yview("scroll", direction * amount, "units")
-        return "break"
-
-    def _tl_on_wheel_h(self, event):
-        amount = max(1, abs(event.delta))
-        direction = -1 if event.delta > 0 else 1
-        self._tl_cv.xview("scroll", direction * amount, "units")
+        amount    = max(1, abs(event.delta))
+        direction = 1 if event.delta > 0 else -1   # natural-scroll direction
+        if event.state & 0x1:   # Shift state = horizontal on macOS
+            self._tl_cv.xview("scroll", direction * amount, "units")
+        else:
+            self._tl_yview("scroll", direction * amount, "units")
         return "break"
 
     def _tl_x(self, sec):
