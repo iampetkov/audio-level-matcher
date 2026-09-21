@@ -17,6 +17,7 @@ applies matched levels to the corresponding assets of a second game.
 - Waveform display per file
 - DAW-like timeline for chaining audio files to audition them in playback scenarios close to how they would be heard in-game.
 - Ability to save the playback scenarios as presets for future use with new sets of files.
+- Undo/Redo
 - Folder path persistence between sessions
 - Packaged as a standalone macOS .app
 
