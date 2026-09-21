@@ -1941,18 +1941,21 @@ class App(tk.Tk):
         self._ruler_cv.bind("<MouseWheel>", self._tl_on_wheel)
 
         # right: scrollable timeline (no ruler — handled by _ruler_cv above)
-        tl_frame = tk.Frame(tracks_row)
-        tl_frame.pack(side="left", fill="both", expand=True)
-
-        self._tl_hscroll = ttk.Scrollbar(tl_frame, orient="horizontal",
-                                          command=lambda *a: self._tl_cv.xview(*a))
-        self._tl_hscroll.pack(side="bottom", fill="x")
-
-        self._tl_cv = tk.Canvas(tl_frame, bg="#f8f8f8",
+        # _tl_cv sits directly in tracks_row so it has the same height as _lbl_cv.
+        # The horizontal scrollbar lives in a separate bottom row to avoid shrinking _tl_cv.
+        self._tl_cv = tk.Canvas(tracks_row, bg="#f8f8f8",
                                 highlightthickness=1, highlightbackground="#ccc",
                                 xscrollcommand=self._tl_xscroll_set,
                                 yscrollcommand=self._tl_yscroll_set)
-        self._tl_cv.pack(side="top", fill="both", expand=True)
+        self._tl_cv.pack(side="left", fill="both", expand=True)
+
+        # bottom row: corner spacer + horizontal scrollbar (keeps _tl_cv full-height)
+        bottom_row = tk.Frame(tl_outer)
+        bottom_row.pack(side="top", fill="x")
+        tk.Frame(bottom_row, width=LABEL_W).pack(side="left")
+        self._tl_hscroll = ttk.Scrollbar(bottom_row, orient="horizontal",
+                                          command=lambda *a: self._tl_cv.xview(*a))
+        self._tl_hscroll.pack(side="left", fill="x", expand=True)
 
         self._tl_cv.bind("<ButtonPress-1>",   self._tl_on_press)
         self._tl_cv.bind("<B1-Motion>",        self._tl_on_motion)
